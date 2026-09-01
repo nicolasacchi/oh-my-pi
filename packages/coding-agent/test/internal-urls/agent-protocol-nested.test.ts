@@ -139,3 +139,169 @@ it("agent:// path form falls back to JSON extraction when no nested output match
 	expect(extracted.contentType).toBe("application/json");
 	expect(JSON.parse(extracted.content)).toEqual({ ok: true });
 });
+
+it("agent:// resolvedModel extraction fills from parked history when yield JSON omits it", async () => {
+	const root = tempDir.path();
+	const rootSessionFile = path.join(root, "resolved-model-session.jsonl");
+	const rootArtifactsDir = rootSessionFile.slice(0, -6);
+	await fs.mkdir(rootArtifactsDir, { recursive: true });
+	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	const yieldJson = { result: { data: { ok: true } }, resolvedModel: null };
+	await fs.writeFile(path.join(rootArtifactsDir, "ThatId.md"), JSON.stringify(yieldJson));
+
+	const fakeSession = {
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+	} as unknown as AgentSession;
+	const registry = AgentRegistry.global();
+	registry.register({
+		id: "Main",
+		displayName: "main",
+		kind: "main",
+		session: fakeSession,
+		sessionFile: rootSessionFile,
+	});
+	registry.register({
+		id: "ThatId",
+		displayName: "sub",
+		kind: "sub",
+		parentId: "Main",
+		session: null,
+		status: "parked",
+		sessionFile: path.join(rootArtifactsDir, "ThatId.jsonl"),
+		history: { resolvedModel: "openrouter/foo:free" },
+	});
+
+	const handler = new AgentProtocolHandler();
+	const extracted = await handler.resolve(new URL("agent://ThatId/resolvedModel") as never);
+	expect(extracted.contentType).toBe("application/json");
+	expect(JSON.parse(extracted.content)).toBe("openrouter/foo:free");
+
+	const viaQuery = await handler.resolve(new URL("agent://ThatId?q=resolvedModel") as never);
+	expect(JSON.parse(viaQuery.content)).toBe("openrouter/foo:free");
+	const viaModel = await handler.resolve(new URL("agent://ThatId?q=model") as never);
+	expect(JSON.parse(viaModel.content)).toBe("openrouter/foo:free");
+	const viaOverride = await handler.resolve(new URL("agent://ThatId?q=modelOverride") as never);
+	expect(JSON.parse(viaOverride.content)).toBe("openrouter/foo:free");
+
+	const full = await handler.resolve(new URL("agent://ThatId") as never);
+	expect(full.contentType).toBe("text/markdown");
+	expect(JSON.parse(full.content)).toEqual(yieldJson);
+});
+
+it("agent:// resolvedModel extraction prefers yield JSON and nested child output over registry", async () => {
+	const root = tempDir.path();
+	const rootSessionFile = path.join(root, "resolved-model-precedence.jsonl");
+	const rootArtifactsDir = rootSessionFile.slice(0, -6);
+	await fs.mkdir(rootArtifactsDir, { recursive: true });
+	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	await fs.writeFile(path.join(rootArtifactsDir, "Yielded.md"), JSON.stringify({ resolvedModel: "yield/from-json" }));
+	const parentOwnDir = path.join(rootArtifactsDir, "Parent");
+	await fs.mkdir(parentOwnDir, { recursive: true });
+	await fs.writeFile(path.join(parentOwnDir, "Parent.resolvedModel.md"), "child capsule");
+	await fs.writeFile(path.join(rootArtifactsDir, "Parent.md"), JSON.stringify({}));
+
+	const fakeSession = {
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+	} as unknown as AgentSession;
+	const registry = AgentRegistry.global();
+	registry.register({
+		id: "Main",
+		displayName: "main",
+		kind: "main",
+		session: fakeSession,
+		sessionFile: rootSessionFile,
+	});
+	registry.register({
+		id: "Yielded",
+		displayName: "sub",
+		kind: "sub",
+		parentId: "Main",
+		session: null,
+		status: "parked",
+		history: { resolvedModel: "openrouter/foo:free" },
+	});
+	registry.register({
+		id: "Parent",
+		displayName: "sub",
+		kind: "sub",
+		parentId: "Main",
+		session: fakeSession,
+		sessionFile: path.join(rootArtifactsDir, "Parent.jsonl"),
+		history: { resolvedModel: "openrouter/foo:free" },
+	});
+
+	const handler = new AgentProtocolHandler();
+	const fromYield = await handler.resolve(new URL("agent://Yielded/resolvedModel") as never);
+	expect(JSON.parse(fromYield.content)).toBe("yield/from-json");
+
+	const nested = await handler.resolve(new URL("agent://Parent/resolvedModel") as never);
+	expect(nested.content).toBe("child capsule");
+	expect(nested.contentType).toBe("text/markdown");
+});
+
+it("agent:// resolvedModel extraction fills from live session getActiveModelString", async () => {
+	const root = tempDir.path();
+	const rootSessionFile = path.join(root, "resolved-model-live.jsonl");
+	const rootArtifactsDir = rootSessionFile.slice(0, -6);
+	await fs.mkdir(rootArtifactsDir, { recursive: true });
+	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	await fs.writeFile(path.join(rootArtifactsDir, "LiveId.md"), JSON.stringify({ result: { ok: true } }));
+
+	const fakeSession = {
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+		getActiveModelString: () => "openrouter/live:free",
+	} as unknown as AgentSession;
+	const registry = AgentRegistry.global();
+	registry.register({
+		id: "Main",
+		displayName: "main",
+		kind: "main",
+		session: fakeSession,
+		sessionFile: rootSessionFile,
+	});
+	registry.register({
+		id: "LiveId",
+		displayName: "sub",
+		kind: "sub",
+		parentId: "Main",
+		session: fakeSession,
+		history: { resolvedModel: "openrouter/foo:free" },
+	});
+
+	const extracted = await new AgentProtocolHandler().resolve(new URL("agent://LiveId/resolvedModel") as never);
+	expect(JSON.parse(extracted.content)).toBe("openrouter/live:free");
+});
+
+it("agent:// nested Child/resolvedModel does not invent a Child id from Parent history", async () => {
+	const root = tempDir.path();
+	const rootSessionFile = path.join(root, "resolved-model-no-child.jsonl");
+	const rootArtifactsDir = rootSessionFile.slice(0, -6);
+	await fs.mkdir(rootArtifactsDir, { recursive: true });
+	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	await fs.writeFile(path.join(rootArtifactsDir, "Parent.md"), JSON.stringify({ result: { ok: true } }));
+
+	const fakeSession = {
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+	} as unknown as AgentSession;
+	const registry = AgentRegistry.global();
+	registry.register({
+		id: "Main",
+		displayName: "main",
+		kind: "main",
+		session: fakeSession,
+		sessionFile: rootSessionFile,
+	});
+	registry.register({
+		id: "Parent",
+		displayName: "sub",
+		kind: "sub",
+		parentId: "Main",
+		session: null,
+		status: "parked",
+		history: { resolvedModel: "openrouter/foo:free" },
+	});
+
+	const extracted = await new AgentProtocolHandler().resolve(new URL("agent://Parent/Child/resolvedModel") as never);
+	expect(extracted.contentType).toBe("application/json");
+	expect(JSON.parse(extracted.content)).toBeNull();
+});

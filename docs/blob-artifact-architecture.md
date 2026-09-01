@@ -171,6 +171,7 @@ Handled by `AgentProtocolHandler` over registered active session artifact direct
 - `?q=` always performs JSON extraction
 - path and query extraction cannot be combined
 - extraction requires valid JSON and returns `application/json`
+- `agent://<id>/resolvedModel` (JSON extract) falls back to the registry/history resolved model when the yield artifact has no such field — the yield `.md` is not a job snapshot, so a naive extract returns JSON `null` even though hub snapshots and `AgentRef.history.resolvedModel` already have it. Full `agent://<id>` remains the yield markdown.
 
 Failure behavior:
 

@@ -75,6 +75,7 @@ Settled response (`async.enabled=false`, no job manager, every item's agent `blo
 Artifacts and side channels:
 - Every subagent with an artifacts dir writes `<id>.md`; `agent://<id>` resolves to that file.
 - A subagent's own children are dot-qualified (`<id>.<child>`); `agent://<id>/<child>` reads that nested output. When the path names no nested output and the file is JSON, `agent://<id>/<path>` and `agent://<id>?q=<query>` perform JSON extraction.
+- `agent://<id>/resolvedModel` (JSON extract) falls back to the registry/history resolved model when the yield artifact has no such field — the yield `.md` is not a job snapshot, so a naive extract returns JSON `null` even though hub snapshots and `AgentRef.history.resolvedModel` already have it. Full `agent://<id>` remains the yield markdown.
 - Each subagent gets `<id>.jsonl` session history when the parent persists artifacts; `history://<id>` renders it as a concise transcript (works for live and parked agents).
 - Isolated patch mode writes `<id>.patch` before merge.
 

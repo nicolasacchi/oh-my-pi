@@ -20,9 +20,39 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
-import { applyQuery, pathToQuery } from "./json-query";
+import { applyQuery, parseQuery, pathToQuery } from "./json-query";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
+
+const MODEL_FIELD_KEYS: Record<string, true> = {
+	resolvedModel: true,
+	model: true,
+	modelOverride: true,
+};
+
+function isModelFieldQuery(query: string): boolean {
+	const tokens = parseQuery(query);
+	return tokens.length === 1 && typeof tokens[0] === "string" && MODEL_FIELD_KEYS[tokens[0]] === true;
+}
+
+/** Live session model string, then parked `history.resolvedModel`. Never invents nested child ids. */
+function registryResolvedModel(id: string | undefined): string | undefined {
+	if (!id) return undefined;
+	const ref = AgentRegistry.global().get(id);
+	if (!ref) return undefined;
+	const session = ref.session as {
+		getActiveModelString?: () => string | undefined;
+		servingModel?: { selector?: string };
+		model?: { provider: string; id: string };
+	} | null;
+	const live =
+		session?.getActiveModelString?.() ??
+		session?.servingModel?.selector ??
+		(session?.model ? `${session.model.provider}/${session.model.id}` : undefined);
+	if (typeof live === "string" && live.length > 0) return live;
+	const parked = ref.history?.resolvedModel;
+	return typeof parked === "string" && parked.length > 0 ? parked : undefined;
+}
 
 /**
  * Handler for agent:// URLs.
@@ -115,7 +145,11 @@ export class AgentProtocolHandler implements ProtocolHandler {
 
 			const query = hasQueryExtraction ? queryParam! : pathToQuery(urlPath);
 			if (query) {
-				const extracted = applyQuery(jsonValue, query);
+				let extracted = applyQuery(jsonValue, query);
+				if ((extracted === undefined || extracted === null) && isModelFieldQuery(query)) {
+					const fallback = registryResolvedModel(scan.matchedId);
+					if (fallback !== undefined) extracted = fallback;
+				}
 				try {
 					content = JSON.stringify(extracted, null, 2) ?? "null";
 				} catch {
