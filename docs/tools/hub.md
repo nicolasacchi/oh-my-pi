@@ -18,7 +18,7 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
   - `packages/coding-agent/src/session/agent-session.ts` — `deliverIrcMessage(...)`: recipient-side injection and wake turns.
   - `packages/coding-agent/src/async/job-manager.ts` — job registry, cancellation, delivery suppression, smart poll ladder.
   - `packages/coding-agent/src/launch/client.ts` / `broker.ts` / `presence.ts` / `protocol.ts` — process-supervision broker.
-  - `packages/coding-agent/src/config/settings-schema.ts` — `irc.timeoutMs`, `async.pollWaitDuration`, `launch.enabled`.
+  - `packages/coding-agent/src/config/settings-schema.ts` — `irc.timeoutMs`, `irc.maxRounds`, `irc.roundBudget`, `async.pollWaitDuration`, `launch.enabled`.
 
 ## Inputs
 
@@ -107,7 +107,9 @@ Each logs result returns a byte cursor; `follow: true` waits until output advanc
 Unchanged from the former `launch` tool: the first process op starts a detached broker over a private socket under `~/.omp/run/daemons/<project-hash>/`; every omp instance in the project shares names, logs, and state. After the last omp process exits, the broker stops non-persistent processes and exits. `persist: true` opts out of last-client teardown; restart policies (`no`/`on-failure`/`always`) use bounded exponential backoff up to 30 s.
 
 ## Limits & Caps
-- Mailboxes: 100 messages per agent (`MAILBOX_CAP`); oldest dropped beyond the cap.
+- Mailboxes: 100 messages per agent (`MAILBOX_CAP`); oldest dropped beyond the cap. Mailboxes remain failed-handoff-only; they are not a debate/round transcript store.
+- `hub send` `rounds` is an integer 1..8, further lowered by `irc.maxRounds` (default 8, clamp 1..8). The setting only lowers the hub send rounds cap; it cannot raise it past 8. `rounds` with `to: "all"` is illegal.
+- `irc.roundBudget` default 40; `0` disables the cap (unlimited) for hub-rounds wakes only. Normal IRC wakes keep budget 0.
 - `irc.timeoutMs` default `120_000`; `0` disables; negative/non-finite fall back to the default.
 - Poll window: `async.pollWaitDuration` — `5s`/`10s`/`30s`/`1m`/`5m`/`smart` (default); smart ladder `[5s..5m]` climbing per back-to-back wait, resetting after 60 s without waiting.
 - Job retention 5 min; manager max-running fallback 15; `async.maxJobs` clamped 1..100.

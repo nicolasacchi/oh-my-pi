@@ -202,11 +202,12 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 For task dispatch, model precedence is:
 
-1. `task.agentModelOverrides[agentName]`
-2. the agent frontmatter's prioritized `model` list
-3. the parent's active model, then its configured/default model fallback
+1. the task item's per-call `model` (`provider/id` or `@role`)
+2. `task.agentModelOverrides[agentName]`
+3. the agent frontmatter's prioritized `model` list
+4. the parent's active model, then its configured/default model fallback (`session`/`@default`)
 
-Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
+The per-call task item `model` outranks `task.agentModelOverrides` and agent frontmatter. Role aliases in any of those sources expand through `modelRoles`. Omit `model` to inherit the rest of the chain. An explicit value is fail-closed: empty, session-inherited (`default` / `@default` / `@task` / legacy aliases via `isSessionInheritedAgentPattern`), unresolvable or unauthenticatable, or literal `default` (no `@`, case-insensitive) fails the spawn with `StructuredSubagentError` preflight. Parent auth-fallback applies only when the field is absent.
 
 Runtime output schema precedence is:
 

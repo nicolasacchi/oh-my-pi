@@ -6,10 +6,12 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema, oneLineLabel } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
-// Contract: the task tool's wire shape is flat `{ name?, agent?, task, isolated? }`
+// Contract: the task tool's wire shape is flat `{ name?, agent?, task, model?, isolated? }`
 // (batch: `{ context, tasks[] }` of the same items). `agent` defaults to the
 // schema's spawn-policy default, and unknown keys sent by stale callers (`role`,
 // `description`) are stripped by the schema's `+: "delete"` — never rejected.
+// `model` is fail-closed at preflight (omit to inherit; literal `"default"` is
+// rejected) and is not gated like `effort`.
 
 describe("oneLineLabel", () => {
 	it("returns short text unchanged", () => {
@@ -67,12 +69,19 @@ describe("task wire schema", () => {
 	});
 
 	it("deletes stale caller keys (role, description) instead of rejecting", () => {
-		const parsed = taskSchema({ agent: "task", task: "x", role: "Rust specialist", description: "stale ui label" });
+		const parsed = taskSchema({
+			agent: "task",
+			task: "x",
+			model: "@smol",
+			role: "Rust specialist",
+			description: "stale ui label",
+		});
 		expect(parsed instanceof type.errors).toBe(false);
 		if (!(parsed instanceof type.errors)) {
 			expect("role" in parsed).toBe(false);
 			expect("description" in parsed).toBe(false);
 			expect(parsed.task).toBe("x");
+			expect(parsed.model).toBe("@smol");
 		}
 	});
 
@@ -92,10 +101,13 @@ describe("task wire schema", () => {
 
 	it("deletes stale keys from batch items", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
-		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", role: "DB migration specialist" }] }));
+		const items = parsedItems(
+			batch({ context: "ctx", tasks: [{ task: "x", model: "@slow", role: "DB migration specialist" }] }),
+		);
 		const item = items[0] ?? {};
 		expect("role" in item).toBe(false);
 		expect(item.task).toBe("x");
+		expect(item.model).toBe("@slow");
 	});
 });
 
@@ -128,6 +140,17 @@ describe("task approval details surface the dispatch", () => {
 		expect(lines).toContain("Agent: reviewer");
 		expect(lines).toContain("Name: ReviewAuth");
 		expect(lines).toContain("Task:\naudit the auth module");
+	});
+
+	it("surfaces the model selector for a flat spawn", async () => {
+		const tool = await makeTool();
+		const lines = tool.formatApprovalDetails({
+			agent: "reviewer",
+			name: "ReviewAuth",
+			task: "audit the auth module",
+			model: "@slow",
+		});
+		expect(lines).toContain("Model: @slow");
 	});
 
 	it("summarizes a homogeneous batch whose agents use the session default", async () => {

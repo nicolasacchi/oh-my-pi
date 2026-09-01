@@ -6,10 +6,11 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 // Contract: the single-spawn schema (`task.batch: false`; the exported
-// `taskSchema` instance) carries no batch fields while accepting a caller
-// `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
-// `context`) is gated by the `task.batch` setting (default on, covered by
-// test/task/task-batch.test.ts).
+// `taskSchema` instance) carries no batch fields while accepting an optional
+// fail-closed `model` (provider/id or @role; omit to inherit; literal `"default"`
+// is rejected at preflight), `outputSchema`, and its validation mode. The batch
+// shape (`tasks[]` + shared `context`) is gated by the `task.batch` setting
+// (default on, covered by test/task/task-batch.test.ts).
 
 describe("task schema (single-spawn)", () => {
 	it("accepts {agent, task}", () => {
@@ -50,6 +51,22 @@ describe("task schema (single-spawn)", () => {
 			expect("schema" in parsed).toBe(false);
 		}
 	});
+
+	it("accepts an optional model selector and still strips stale keys", () => {
+		const parsed = taskSchema({
+			agent: "scout",
+			task: "Map the auth module.",
+			model: "@smol",
+			role: "Rust specialist",
+			description: "stale ui label",
+		});
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect(parsed.model).toBe("@smol");
+			expect("role" in parsed).toBe(false);
+			expect("description" in parsed).toBe(false);
+		}
+	});
 });
 
 describe("task spawn validation", () => {
@@ -84,5 +101,27 @@ describe("task spawn validation", () => {
 	it("rejects a missing task", async () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
+	});
+
+	it("rejects literal model default at preflight", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "General-purpose task agent",
+					systemPrompt: "You are a task agent.",
+					source: "bundled",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const tool = await TaskTool.create(createSession());
+		const result = await tool.execute("tool-call", {
+			agent: "task",
+			task: "Map the auth module.",
+			model: "default",
+		});
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("Omit the field to inherit");
 	});
 });

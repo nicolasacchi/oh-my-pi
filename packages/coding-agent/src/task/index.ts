@@ -279,6 +279,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("effort" in params) item.effort = params.effort;
+	if ("model" in params) item.model = params.model;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
 }
@@ -300,6 +301,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
@@ -438,6 +440,57 @@ export function composeSpawnAdvisory(args: {
 	);
 }
 
+function formatModelSelector(model: unknown): string | undefined {
+	if (typeof model === "string") {
+		const trimmed = model.trim();
+		return trimmed || undefined;
+	}
+	if (Array.isArray(model)) {
+		const parts = model.map(entry => (typeof entry === "string" ? entry.trim() : "")).filter(Boolean);
+		return parts.length > 0 ? parts.join(", ") : undefined;
+	}
+	return undefined;
+}
+
+/** Advisory when a batch resolved 2+ items to the same model (drafter/critic same vendor). */
+function buildSameModelWarning(overrides: Array<string | string[] | undefined>): string | undefined {
+	if (overrides.length < 2) return undefined;
+	const counts = new Map<string, number>();
+	for (const override of overrides) {
+		const key = Array.isArray(override)
+			? override
+					.map(entry => entry.trim())
+					.filter(Boolean)
+					.join(",")
+			: override?.trim();
+		if (!key) continue;
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	for (const [model, count] of counts) {
+		if (count >= 2) {
+			return `Warning: ${count} tasks resolved to the same model (${model}). A drafter/critic pair on the same vendor is less useful; pick distinct models.`;
+		}
+	}
+	return undefined;
+}
+
+function appendResultNotice(
+	result: AgentToolResult<TaskToolDetails>,
+	notice: string | undefined,
+): AgentToolResult<TaskToolDetails> {
+	if (!notice) return result;
+	let appended = false;
+	const content = result.content.map(part => {
+		if (!appended && part.type === "text" && typeof part.text === "string") {
+			appended = true;
+			return { ...part, text: `${part.text}\n\n${notice}` };
+		}
+		return part;
+	});
+	if (!appended) content.push({ type: "text", text: notice });
+	return { ...result, content };
+}
+
 /** Sentinel for async jobs whose subagent finished with a failing result; progress is already updated. */
 class TaskJobError extends Error {}
 
@@ -512,6 +565,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.agent === "string") {
 			lines.push(`Agent: ${truncateForPrompt(params.agent)}`);
 		}
+		const model = formatModelSelector(params.model);
+		if (model) lines.push(`Model: ${truncateForPrompt(model)}`);
 		if (typeof params.name === "string" && params.name.trim()) {
 			lines.push(`Name: ${truncateForPrompt(params.name)}`);
 		}
@@ -545,6 +600,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					lines.push(`Name: ${truncateForPrompt(firstTask.name)}`);
 				}
 				lines.push(`Agent: ${truncateForPrompt(effectiveAgent(firstTask))}`);
+				const itemModel = formatModelSelector("model" in firstTask ? firstTask.model : undefined);
+				if (itemModel) lines.push(`Model: ${truncateForPrompt(itemModel)}`);
 				if ("task" in firstTask && typeof firstTask.task === "string") {
 					lines.push(`Task:\n${truncateForPrompt(firstTask.task)}`);
 				}
@@ -663,6 +720,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
+			...(params.model !== undefined ? { model: params.model } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
@@ -727,6 +785,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
+		const sameModelWarning = buildSameModelWarning(policies.map(policy => policy.modelOverride));
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -770,17 +829,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
+			return appendResultNotice(result, [sameModelWarning, advisory].filter(Boolean).join("\n\n") || undefined);
 		}
 
 		// Coordination only makes sense for spawns that keep running after this
@@ -802,19 +851,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Returns a fresh result (copied content array, copied text part) rather
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
-		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
-		};
+		const notice = [sameModelWarning, advisory].filter(Boolean).join("\n\n") || undefined;
+		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> =>
+			appendResultNotice(result, notice);
 		if (asyncItems.length === 0) {
 			return withAdvisory(
 				await this.#executeSyncFanout(
@@ -1434,6 +1473,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				...(params.model !== undefined ? { model: params.model } : {}),
 				// `name` is the spawn handle: keep it for id allocation when this
 				// path did not pre-reserve one. Do not treat it as a HUD description.
 				identity: { id: preAllocatedId, label: params.name },

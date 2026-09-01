@@ -26,6 +26,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
     Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
     NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
+  - `model`: provider/id or @role. Omit for the agent's default. Must not bypass disabledAgents. Must not pass `default`.
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
@@ -43,6 +44,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - `agent`: The agent type to spawn (e.g. {{#if scoutAvailable}}`scout`, {{/if}}`reviewer`).
   Omitting `agent` selects the spawn-policy default (`{{defaultAgent}}`). Use it only when that agent fits the task.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
   NEVER pass the spawn-policy default explicitly. Only omit it after checking the available agents below.
+- `model`: provider/id or @role. Omit for the agent's default. Must not bypass disabledAgents. Must not pass `default`.
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
@@ -56,6 +58,8 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{/if}}
 {{/if}}
+
+Example (debate batch): Drafter `{ name: "Drafter", agent: "task", model: "@task", task: "Draft the change." }` + Critic `{ name: "Critic", agent: "reviewer", model: "@slow", task: "Critique the draft." }`.
 
 # Communication
 Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}

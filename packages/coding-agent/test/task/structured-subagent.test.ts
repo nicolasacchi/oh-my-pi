@@ -277,15 +277,14 @@ describe("structured subagent primitive", () => {
 		);
 		expect(definitionPolicy.modelRole).toBe("definition");
 	});
-	it("falls through an empty request selector to the agent definition role", async () => {
+	it("rejects an empty request selector instead of falling through", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
 
-		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "" }));
-
-		expect(policy.modelRole).toBe("definition");
-		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model: "" }))).rejects.toThrow(
+			"Task model selector is empty",
+		);
 	});
 
 	it("falls through an empty configured override to the agent definition role", async () => {

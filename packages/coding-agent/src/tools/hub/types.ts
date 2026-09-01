@@ -114,6 +114,12 @@ export interface CoordinationDetails {
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */
 	agents?: AgentActivitySnapshot[];
+	/** 1-based index of the last completed or stopping hub send round. */
+	round?: number;
+	/** Clamped round cap for this send (`irc.maxRounds`, max 8). */
+	of?: number;
+	/** Why a `rounds>1` send loop stopped. */
+	stopReason?: "cap" | "abort" | "timeout" | "failed" | "done";
 }
 
 /** Hub result details: coordination snapshots or launch (process) state. */
@@ -126,6 +132,7 @@ export type HubRenderArgs = {
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
+	rounds?: number;
 	from?: string;
 	timeoutMs?: number;
 	peek?: boolean;

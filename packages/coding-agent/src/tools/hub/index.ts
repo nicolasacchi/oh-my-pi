@@ -85,6 +85,9 @@ const hubSchema = type({
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
+	"rounds?": type("1 <= number.integer <= 8").describe(
+		'send: runtime send→wait loop with `to`; omit or 1 = single send; illegal with to:"all"; clamped to irc.maxRounds (default 8)',
+	),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
@@ -202,6 +205,15 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				to: "Main",
 				message: "JWT or session cookies for the auth flow?",
 				await: true,
+			},
+		},
+		{
+			caption: "Runtime round loop — N send/wait exchanges without re-calling",
+			call: {
+				op: "send",
+				to: "Critic",
+				message: "Falsify the claim in local://draft.md",
+				rounds: 3,
 			},
 		},
 		{

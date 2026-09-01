@@ -8,7 +8,12 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { isAuthenticated, kNoAuth } from "../config/model-registry";
+import {
+	isSessionInheritedAgentPattern,
+	resolveAgentModelSelection,
+	resolveModelOverride,
+} from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -238,6 +243,63 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /**
+ * Fail-closed when the caller set `request.model`: empty, literal `"default"`,
+ * session-inherited (`default` / `@default` / `@task` / legacy), unresolved,
+ * or unauthenticatable. Parent auth-fallback is only used when `model` is
+ * absent. Runs after {@link resolveAgentModelSelection} and before
+ * {@link resolveModelOverrideWithAuthFallback}.
+ */
+async function assertExplicitModelFailClosed(request: StructuredSubagentRequest, patterns: string[]): Promise<void> {
+	if (request.model === undefined) return;
+	const entries = Array.isArray(request.model)
+		? request.model.map(entry => (typeof entry === "string" ? entry : String(entry)))
+		: [request.model];
+	if (entries.length === 0 || entries.every(entry => entry.trim() === "")) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Task model selector is empty. Omit `model` to inherit the agent's default.",
+		);
+	}
+	for (const entry of entries) {
+		const trimmed = entry.trim();
+		if (trimmed.toLowerCase() === "default") {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Do not pass \`model: "${trimmed}"\`. Omit the field to inherit the agent's default.`,
+			);
+		}
+		if (isSessionInheritedAgentPattern(trimmed)) {
+			throw new StructuredSubagentError(
+				"preflight",
+				`Task model selector ${JSON.stringify(trimmed)} inherits the session model. Omit \`model\` to inherit, or pass a provider/id or @role.`,
+			);
+		}
+	}
+	if (patterns.length === 0) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Task model selector ${JSON.stringify(request.model)} did not resolve to any model patterns.`,
+		);
+	}
+	const registry = request.session.modelRegistry;
+	if (!registry?.getAvailable || !registry.getApiKey) return;
+	const resolved = resolveModelOverride(patterns, registry, request.session.settings);
+	if (!resolved.model) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Task model selector ${JSON.stringify(request.model)} did not match an available model.`,
+		);
+	}
+	const key = await registry.getApiKey(resolved.model, request.session.getSessionId?.() ?? undefined);
+	if (key !== kNoAuth && !isAuthenticated(key)) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Task model selector ${JSON.stringify(request.model)} is not authenticatable. Parent auth-fallback is only used when \`model\` is omitted.`,
+		);
+	}
+}
+
+/**
  * Resolve every policy shared by task and eval before allocating artifacts or
  * dispatching work. Callers translate {@link StructuredSubagentError} into
  * their own wire-level error surface.
@@ -293,6 +355,7 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	await assertExplicitModelFailClosed(request, modelOverride);
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && isolationMode === "none") {

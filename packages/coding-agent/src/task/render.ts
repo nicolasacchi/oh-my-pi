@@ -119,10 +119,19 @@ function appendAgentStats(
 	if (opts.cost > 0) {
 		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`)}`;
 	}
-	if (opts.resolvedModel && opts.showResolvedModelBadge) {
+	if (opts.resolvedModel && (opts.showResolvedModelBadge || opts.resolvedModel)) {
 		line += `${theme.sep.dot}${theme.fg("dim", truncateToWidth(replaceTabs(opts.resolvedModel), 30))}`;
 	}
 	return line;
+}
+
+function optionalRoundLabel(source: unknown): string | undefined {
+	if (!source || typeof source !== "object") return undefined;
+	const rec = source as { round?: unknown; of?: unknown };
+	const round = typeof rec.round === "number" && Number.isFinite(rec.round) ? rec.round : undefined;
+	const of = typeof rec.of === "number" && Number.isFinite(rec.of) ? rec.of : undefined;
+	if (round === undefined) return undefined;
+	return of === undefined ? `round ${round}` : `round ${round}/${of}`;
 }
 
 function formatFindingSummary(findings: FindingDetails[], theme: Theme): string {
@@ -948,7 +957,7 @@ function renderAgentProgress(
 		statusLine += ` ${formatBadge(statusLabel, iconColor, theme)}`;
 	}
 
-	const showBadge = settings.get("task.showResolvedModelBadge");
+	const showBadge = Boolean(progress.resolvedModel) || settings.get("task.showResolvedModelBadge");
 	if (progress.status === "running") {
 		if (!description) {
 			const taskPreview = previewLine(sanitizeText(progress.assignment ?? progress.task), 40);
@@ -958,6 +967,8 @@ function renderAgentProgress(
 	} else if (progress.status === "completed") {
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
 	}
+	const roundLabel = optionalRoundLabel(progress);
+	if (roundLabel) statusLine += `${theme.sep.dot}${theme.fg("dim", roundLabel)}`;
 
 	lines.push(statusLine);
 
@@ -1253,7 +1264,7 @@ function renderAgentResult(
 		success && !needsWarning ? "text" : "accent",
 		titlePart,
 	)}${agentTypeBadge(result.agent, theme)} ${formatBadge(statusText, iconColor, theme)}`;
-	const showBadge = settings.get("task.showResolvedModelBadge");
+	const showBadge = Boolean(result.resolvedModel) || settings.get("task.showResolvedModelBadge");
 	statusLine = appendAgentStats(
 		statusLine,
 		{
@@ -1267,6 +1278,8 @@ function renderAgentResult(
 		},
 		theme,
 	);
+	const resultRoundLabel = optionalRoundLabel(result);
+	if (resultRoundLabel) statusLine += `${theme.sep.dot}${theme.fg("dim", resultRoundLabel)}`;
 	statusLine += `${theme.sep.dot}${theme.fg("dim", formatDuration(result.durationMs))}`;
 
 	if (result.truncated) {

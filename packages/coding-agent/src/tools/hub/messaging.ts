@@ -18,6 +18,7 @@ import { IrcAwaitTargetStopped, IrcBus, type IrcDeliveryReceipt, type IrcMessage
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
+import { armRoundWake, disarmRoundWake } from "../../task/executor";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import {
@@ -133,6 +134,50 @@ export function resolveMessageTimeoutMs(settings: Settings, explicit?: number): 
 	return normalizeIrcTimeoutMs(settings.get("irc.timeoutMs"));
 }
 
+export const DEFAULT_IRC_MAX_ROUNDS = 8;
+export const DEFAULT_IRC_ROUND_BUDGET = 40;
+
+const MAIN_BINDING_OPEN = '<binding from="Main">';
+const MAIN_BINDING_CLOSE = "</binding>";
+
+/** L5 owns `irc.maxRounds` / `irc.roundBudget`; read with fallback until the schema lands. */
+function readIrcNumberSetting(settings: Settings, path: string): number | undefined {
+	try {
+		const value = (settings.get as (key: string) => unknown)(path);
+		if (typeof value === "number" && Number.isFinite(value)) return value;
+	} catch {
+		// Schema key missing or unreadable — caller uses the documented default.
+	}
+	return undefined;
+}
+
+/** `irc.maxRounds` default 8, clamped to 1..8. */
+export function resolveIrcMaxRounds(settings: Settings): number {
+	const raw = readIrcNumberSetting(settings, "irc.maxRounds");
+	if (raw === undefined) return DEFAULT_IRC_MAX_ROUNDS;
+	return Math.min(DEFAULT_IRC_MAX_ROUNDS, Math.max(1, Math.trunc(raw)));
+}
+
+/** `irc.roundBudget` default 40; 0 = unlimited on round wakes only. */
+export function resolveIrcRoundBudget(settings: Settings): number {
+	const raw = readIrcNumberSetting(settings, "irc.roundBudget");
+	if (raw === undefined) return DEFAULT_IRC_ROUND_BUDGET;
+	const n = Math.trunc(raw);
+	if (!Number.isFinite(n) || n < 0) return DEFAULT_IRC_ROUND_BUDGET;
+	return n;
+}
+
+/** Visible binding block: child prompts treat Main-wrapped hub bodies as orders. */
+export function wrapMainBinding(message: string): string {
+	return `${MAIN_BINDING_OPEN}\n${message}\n${MAIN_BINDING_CLOSE}`;
+}
+
+function outgoingIrcBody(senderId: string, message: string, round?: { i: number; of: number }): string {
+	const payload = senderId === MAIN_AGENT_ID ? wrapMainBinding(message) : message;
+	if (!round) return payload;
+	return `round ${round.i}/${round.of}\n\n${payload}`;
+}
+
 /** Session-buffered inbox drain used before parking a bus waiter. */
 export function drainPendingInbox(registry: AgentRegistry, senderId: string, from?: string): IrcMessage | undefined {
 	const session = registry.get(senderId)?.session;
@@ -223,6 +268,7 @@ export interface HubSendParams {
 	replyTo?: string;
 	await?: boolean;
 	timeoutMs?: number;
+	rounds?: number;
 }
 
 export async function executeSend(
@@ -249,6 +295,17 @@ export async function executeSend(
 			from: senderId,
 			to,
 		});
+	}
+	if (isBroadcast && params.rounds !== undefined && params.rounds > 1) {
+		return hubErrorResult('`rounds` is invalid with to:"all" — a round loop needs a single peer.', {
+			op: "send",
+			from: senderId,
+			to,
+			stopReason: "failed",
+		});
+	}
+	if (params.rounds !== undefined && params.rounds > 1) {
+		return executeSendRounds(deps, params, to, message, signal);
 	}
 	// A direct send may address a parked id that another root's scan (or a
 	// prior list) restored into this process-global registry. Refresh this
@@ -306,7 +363,7 @@ export async function executeSend(
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(
-					{ from: senderId, to: target, body: message, replyTo: params.replyTo },
+					{ from: senderId, to: target, body: outgoingIrcBody(senderId, message), replyTo: params.replyTo },
 					// Awaited sends mark the sender as blocked on an answer so a
 					// busy recipient that cannot reach a step boundary (async
 					// disabled) auto-replies instead of stranding the sender.
@@ -390,6 +447,145 @@ export async function executeSend(
 	} finally {
 		awaitAbort?.abort(awaitCancelled);
 		removeAwaitAbortListener?.();
+	}
+}
+
+async function executeSendRounds(
+	deps: { registry: AgentRegistry; senderId: string; settings: Settings; sessionFileHint?: string | null },
+	params: HubSendParams,
+	to: string,
+	message: string,
+	signal?: AbortSignal,
+): Promise<AgentToolResult<CoordinationDetails>> {
+	const { registry, senderId, settings, sessionFileHint } = deps;
+	const requested = Math.trunc(params.rounds ?? 1);
+	const maxRounds = resolveIrcMaxRounds(settings);
+	const of = Math.min(maxRounds, Math.max(1, requested));
+	const timeoutMs = resolveMessageTimeoutMs(settings);
+	const bus = IrcBus.global();
+	if (sessionFileHint) {
+		await ensurePersistedRoster(registry, sessionFileHint);
+	}
+
+	armRoundWake(to, resolveIrcRoundBudget(settings));
+
+	const lines: string[] = [];
+	let waited: IrcMessage | null | undefined;
+	let receipts: IrcDeliveryReceipt[] = [];
+	let round = 0;
+
+	const result = (
+		reason: NonNullable<CoordinationDetails["stopReason"]>,
+		isError: boolean,
+		lastRound: number,
+	): AgentToolResult<CoordinationDetails> => {
+		const roundLine = `round ${lastRound}/${of}`;
+		if (!lines.includes(roundLine)) lines.push(roundLine);
+		if (!lines.some(line => line.startsWith("stopReason:"))) {
+			lines.push(`stopReason: ${reason}`);
+		}
+		return {
+			content: [{ type: "text", text: lines.join("\n") }],
+			details: {
+				op: "send",
+				from: senderId,
+				to,
+				receipts,
+				round: lastRound,
+				of,
+				stopReason: reason,
+				...(waited !== undefined ? { waited } : {}),
+			},
+			isError,
+		};
+	};
+
+	try {
+		for (round = 1; round <= of; round++) {
+			if (signal?.aborted || registry.get(to)?.status === "aborted") {
+				return result("abort", true, round);
+			}
+
+			const awaitAbort = new AbortController();
+			const awaitCancelled = new Error("IRC await cancelled");
+			let removeAwaitAbortListener: (() => void) | undefined;
+			// Register the waiter before send so an instant reply cannot miss
+			// the mailbox (successful DMs are not buffered). Mirror executeSend.
+			const waiting = bus
+				.wait(senderId, { from: to }, timeoutMs, awaitAbort.signal, {
+					drainPending: false,
+					awaitTarget: { registry, target: to },
+				})
+				.then(
+					msg => ({ message: msg, error: null as Error | null }),
+					error => ({
+						message: null as IrcMessage | null,
+						error: error === awaitCancelled ? null : error instanceof Error ? error : new Error(String(error)),
+					}),
+				);
+			if (signal) {
+				if (signal.aborted) {
+					awaitAbort.abort(signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted"));
+				} else {
+					const onAbort = (): void => {
+						awaitAbort.abort(signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted"));
+					};
+					signal.addEventListener("abort", onAbort, { once: true });
+					removeAwaitAbortListener = () => signal.removeEventListener("abort", onAbort);
+				}
+			}
+
+			try {
+				const receipt = await bus.send(
+					{
+						from: senderId,
+						to,
+						body: outgoingIrcBody(senderId, message, { i: round, of }),
+						replyTo: params.replyTo,
+					},
+					{ expectsReply: true },
+				);
+				receipts = [receipt];
+				lines.push(`round ${round}/${of}`);
+				if (receipt.outcome === "failed") {
+					lines.push(`- ${receipt.to}: failed — ${receipt.error ?? "unknown error"}`);
+					awaitAbort.abort(awaitCancelled);
+					const settled = await waiting;
+					if (settled.error && !(settled.error instanceof IrcAwaitTargetStopped)) throw settled.error;
+					return result("failed", true, round);
+				}
+				lines.push(`- ${receipt.to}: ${receipt.outcome}`);
+
+				const reply = await waiting;
+
+				if (reply.error) {
+					if (reply.error instanceof IrcAwaitTargetStopped) {
+						lines.push(`${to} stopped without replying.`);
+						return result("abort", true, round);
+					}
+					if (signal?.aborted) {
+						lines.push(`Reply wait interrupted before ${to} answered.`);
+						return result("abort", true, round);
+					}
+					throw reply.error;
+				}
+
+				waited = reply.message;
+				if (!waited) {
+					lines.push(`No reply from ${to} within ${formatDuration(timeoutMs)}.`);
+					return result("timeout", true, round);
+				}
+				lines.push(`Reply from ${waited.from}:`);
+				lines.push(waited.body);
+			} finally {
+				awaitAbort.abort(awaitCancelled);
+				removeAwaitAbortListener?.();
+			}
+		}
+
+		return result(requested > of ? "cap" : "done", false, of);
+	} finally {
+		disarmRoundWake(to);
 	}
 }
 
@@ -544,6 +740,7 @@ function callMeta(args: HubRenderArgs | undefined): string[] {
 	if (args?.op === "send") {
 		if (args.to === "all") meta.push("broadcast");
 		if (args.await) meta.push("await reply");
+		if (args.rounds !== undefined && args.rounds > 1) meta.push(`rounds ${args.rounds}`);
 		if (args.replyTo) meta.push("reply");
 	}
 	if (args?.op === "wait" && args.timeoutMs) meta.push(`timeout ${formatDuration(args.timeoutMs)}`);
@@ -643,6 +840,10 @@ function renderSendResult(
 		if (failedCount > 0) meta.push(theme.fg("error", `${failedCount} failed`));
 	}
 	if (timedOut) meta.push(theme.fg("warning", "no reply"));
+	if (details.round !== undefined && details.of !== undefined) {
+		meta.push(`round ${details.round}/${details.of}`);
+	}
+	if (details.stopReason) meta.push(details.stopReason);
 
 	const icon = result.isError
 		? { icon: "error" as const }

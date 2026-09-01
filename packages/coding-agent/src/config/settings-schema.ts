@@ -4662,6 +4662,46 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"irc.maxRounds": {
+		type: "number",
+		default: 8,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "IRC Max Rounds",
+			description:
+				"Operator ceiling for hub send rounds (integer, clamped 1..8). Only lowers the hub send rounds cap; it cannot raise it past 8.",
+			options: [
+				{ value: "1", label: "1 round" },
+				{ value: "2", label: "2 rounds" },
+				{ value: "3", label: "3 rounds" },
+				{ value: "4", label: "4 rounds" },
+				{ value: "5", label: "5 rounds" },
+				{ value: "6", label: "6 rounds" },
+				{ value: "7", label: "7 rounds" },
+				{ value: "8", label: "8 rounds", description: "Default" },
+			],
+		},
+	},
+
+	"irc.roundBudget": {
+		type: "number",
+		default: 40,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "IRC Round Budget",
+			description:
+				"Request budget for hub-rounds wakes only (when hub send runs with rounds>1). 0 disables the cap (unlimited). Does not change the normal IRC wake budget, which stays 0.",
+			options: [
+				{ value: "0", label: "Unlimited" },
+				{ value: "20", label: "20 requests" },
+				{ value: "40", label: "40 requests", description: "Default" },
+				{ value: "80", label: "80 requests" },
+			],
+		},
+	},
+
 	"bash.autoBackground.thresholdMs": {
 		type: "number",
 		default: 60_000,

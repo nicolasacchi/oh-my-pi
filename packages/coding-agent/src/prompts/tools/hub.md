@@ -8,6 +8,7 @@ Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`
 - **The user is NOT a peer.** `Main` answers the user ONLY in a plain text block; a `send` shows them a tool-card preview (2 lines while collapsed). Thinking is not output either.
 - **`send`** (with `to`): fire-and-forget, NEVER blocks. Delivery receipts (`delivered`/`failed`) immediate; `failed` → peer gone, don't retry.
   Sending wakes `idle`/`parked` peers. Answering: lead with answer, NEVER quote, set `replyTo`.
+- **`rounds`** (send): a runtime send→wait loop between you and `to`, capped at 8 (`irc.maxRounds`). Omit or `1` = a single send. `to:"all"` is illegal with `rounds>1`. The tool drives N waits — do NOT also recurse in prose or nest another round loop. Each IRC body includes `round i/N`.
 - **Format**: plain prose ONLY. No JSON status objects. Share paths via `local://`/`artifact://` URLs, not pasted blobs.
 - **`wait`**: use ONLY when completely blocked with no other work. Returns on the FIRST of: an incoming message, a watched job finishing, the wait window elapsing, or a steering interrupt — NOT when all jobs finish; re-issue to keep waiting.
   - Bare `wait` watches every running job AND incoming messages. NEVER pass an array of every running ID; `ids` narrows to specific jobs, `from` to one peer (or use `await: true` on send).

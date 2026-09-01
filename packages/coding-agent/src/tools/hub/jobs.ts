@@ -154,6 +154,15 @@ interface TrackedJobLike {
 	errorText?: string;
 }
 
+function jobRoundLabel(source: unknown): string | undefined {
+	if (!source || typeof source !== "object") return undefined;
+	const rec = source as { round?: unknown; of?: unknown };
+	const round = typeof rec.round === "number" && Number.isFinite(rec.round) ? rec.round : undefined;
+	const of = typeof rec.of === "number" && Number.isFinite(rec.of) ? rec.of : undefined;
+	if (round === undefined) return undefined;
+	return of === undefined ? `round ${round}` : `round ${round}/${of}`;
+}
+
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
@@ -161,6 +170,8 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		const latest = current ?? j;
 		const resultConsumed = session.asyncJobManager?.isJobResultConsumed(latest.id) === true;
 		let resolvedModel: string | undefined;
+		let round: number | undefined;
+		let of: number | undefined;
 		if (latest.type === "task") {
 			const progressValue = latest.latestDetails?.progress;
 			if (Array.isArray(progressValue)) {
@@ -179,6 +190,10 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 					const trimmed = modelValue.trim();
 					if (trimmed) resolvedModel = trimmed;
 				}
+				const roundValue = progressRecord?.round ?? latest.latestDetails?.round;
+				if (typeof roundValue === "number" && Number.isFinite(roundValue)) round = roundValue;
+				const ofValue = progressRecord?.of ?? latest.latestDetails?.of;
+				if (typeof ofValue === "number" && Number.isFinite(ofValue)) of = ofValue;
 			}
 		}
 		return {
@@ -188,9 +203,11 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
 			...(resolvedModel ? { resolvedModel } : {}),
+			...(round !== undefined ? { round } : {}),
+			...(of !== undefined ? { of } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
-		};
+		} as JobSnapshot;
 	});
 }
 
@@ -228,7 +245,8 @@ export function buildJobResult(
 	if (completed.length > 0) {
 		lines.push(`## Completed (${completed.length})\n`);
 		for (const j of completed) {
-			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
+			const completedRound = jobRoundLabel(j);
+			lines.push(`### ${j.id} [${j.type}] — ${j.status}${completedRound ? ` — ${completedRound}` : ""}`);
 			lines.push(`Label: ${j.label}`);
 			if (j.status !== "cancelled") {
 				lines.push(
@@ -250,7 +268,9 @@ export function buildJobResult(
 	if (running.length > 0) {
 		lines.push(`## Still Running (${running.length})\n`);
 		for (const j of running) {
-			lines.push(`- \`${j.id}\` [${j.type}] — ${j.label}`);
+			const runningRound = jobRoundLabel(j);
+			const runningRoundText = runningRound ? ` — ${runningRound}` : "";
+			lines.push(`- \`${j.id}\` [${j.type}] — ${j.label}${runningRoundText}`);
 		}
 	}
 
@@ -573,6 +593,8 @@ export function jobsRenderResult(
 	if (agents.length > 0 && jobs.length > 0) {
 		meta.push(uiTheme.fg("accent", `${agents.length} agent${agents.length === 1 ? "" : "s"}`));
 	}
+	const detailsRound = jobRoundLabel(result.details);
+	if (detailsRound) meta.push(uiTheme.fg("dim", detailsRound));
 
 	const headerIcon: ToolUIStatus =
 		counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success";
@@ -651,20 +673,17 @@ export function jobsRenderResult(
 							visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
 						}
 						const durationText = uiTheme.fg("dim", formatDuration(job.durationMs));
+						const resolvedModelLabel =
+							job.type === "task" && typeof job.resolvedModel === "string" ? job.resolvedModel.trim() : "";
 						const modelText =
-							job.type === "task" &&
-							typeof job.resolvedModel === "string" &&
-							job.resolvedModel.trim() &&
-							settings.get("task.showResolvedModelBadge")
+							resolvedModelLabel && (settings.get("task.showResolvedModelBadge") || Boolean(resolvedModelLabel))
 								? `${uiTheme.sep.dot}${uiTheme.fg(
 										"dim",
-										truncateToWidth(
-											replaceTabs(job.resolvedModel.trim()),
-											MODEL_BADGE_MAX_WIDTH,
-											Ellipsis.Unicode,
-										),
+										truncateToWidth(replaceTabs(resolvedModelLabel), MODEL_BADGE_MAX_WIDTH, Ellipsis.Unicode),
 									)}`
 								: "";
+						const roundLabel = jobRoundLabel(job);
+						const roundText = roundLabel ? `${uiTheme.sep.dot}${uiTheme.fg("dim", roundLabel)}` : "";
 						// Running rows in a live block shimmer their label; once the block
 						// stops animating (sealed, or a settled snapshot — spinnerFrame
 						// cleared) they render static so scrollback never keeps a mid-sweep
@@ -677,7 +696,7 @@ export function jobsRenderResult(
 								: uiTheme.fg("accent", headRaw)
 							: uiTheme.fg("toolOutput", headRaw);
 						lines.push(
-							`${icon}${idPart} ${typeBadge} ${headLabel}${modelText}${modelText ? uiTheme.sep.dot : " "}${durationText}`,
+							`${icon}${idPart} ${typeBadge} ${headLabel}${modelText}${roundText}${modelText || roundText ? uiTheme.sep.dot : " "}${durationText}`,
 						);
 						for (let i = 1; i < visibleLabelLines.length; i++) {
 							lines.push(`  ${uiTheme.fg("toolOutput", visibleLabelLines[i]!)}`);

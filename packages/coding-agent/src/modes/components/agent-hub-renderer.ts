@@ -92,6 +92,17 @@ function formatResolvedModelBadge(resolved: string, preserveProvider = false, fa
 	return formatModelBadge(label, explicitLevel ?? fallbackLevel);
 }
 
+/** `round i/N` from CoordinationDetails/progress when those optional fields exist. */
+export function formatRoundBadge(source: unknown): string | undefined {
+	if (!source || typeof source !== "object") return undefined;
+	const rec = source as { round?: unknown; of?: unknown };
+	const round = typeof rec.round === "number" && Number.isFinite(rec.round) ? rec.round : undefined;
+	const of = typeof rec.of === "number" && Number.isFinite(rec.of) ? rec.of : undefined;
+	if (round === undefined) return undefined;
+	const label = of === undefined ? `round ${round}` : `round ${round}/${of}`;
+	return theme.fg("dim", label);
+}
+
 /**
  * Resolved model + reasoning level for a hub row. Exact executor progress is
  * authoritative (and survives completion); direct live sessions are the
@@ -110,15 +121,24 @@ export function modelBadge(ref: AgentRef, observed: ObservableSession | undefine
 		(serving?.isFallback ? serving.selector : undefined) ??
 		(progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined) ??
 		(ref.history?.resolvedModelIsFallback ? ref.history.resolvedModel : undefined);
+	let badge: string | undefined;
 	if (fallbackSelector) {
-		return `${theme.fg("warning", "fallback →")} ${formatResolvedModelBadge(fallbackSelector, true, liveThinkingLevel)}`;
+		badge = `${theme.fg("warning", "fallback →")} ${formatResolvedModelBadge(fallbackSelector, true, liveThinkingLevel)}`;
+	} else {
+		const resolvedModel = progress?.resolvedModel ?? ref.history?.resolvedModel ?? serving?.selector;
+		if (resolvedModel) {
+			badge = formatResolvedModelBadge(resolvedModel, false, liveThinkingLevel);
+		} else {
+			const model = ref.session?.model;
+			if (model) {
+				const level = model.thinking ? liveThinkingLevel : undefined;
+				badge = formatModelBadge(model.id, level);
+			}
+		}
 	}
-	const resolvedModel = progress?.resolvedModel ?? ref.history?.resolvedModel ?? serving?.selector;
-	if (resolvedModel) return formatResolvedModelBadge(resolvedModel, false, liveThinkingLevel);
-	const model = ref.session?.model;
-	if (!model) return undefined;
-	const level = model.thinking ? liveThinkingLevel : undefined;
-	return formatModelBadge(model.id, level);
+	const round = formatRoundBadge(progress);
+	if (badge && round) return `${badge}${theme.sep.dot}${round}`;
+	return badge ?? round;
 }
 
 export function formatMetricDuration(metrics: AgentMetrics): string | undefined {

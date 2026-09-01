@@ -2,9 +2,12 @@
  * Contracts: task.batch gating (batch spawning + shared context).
  *
  * 1. The wire schema is shape-swapped by `task.batch`: `{ context, tasks[] }`
- *    when on (per-spawn fields — including `model`, `isolated`, `outputSchema`, and
- *    `schemaMode` — live in the items), the flat form exposes those fields
- *    directly. The stale `schema` field is never accepted.
+ *    when on (per-spawn fields — including fail-closed `model`, `isolated`,
+ *    `outputSchema`, and `schemaMode` — live in the items), the flat form
+ *    exposes those fields directly. `model` is always visible (not gated like
+ *    `effort`): omit to inherit; empty / literal `"default"` / session-inherited
+ *    / unauthenticatable fail closed at preflight. The stale `schema` field is
+ *    never accepted.
  * 2. Shape validation rejects stale `schema`, `tasks`/`context` while batch
  *    is disabled, top-level `task` in batch calls, empty/invalid items,
  *    duplicate names, and a missing shared `context`.
@@ -14,6 +17,8 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -48,6 +53,7 @@ function createSession(
 		agentId?: string;
 		planMode?: boolean;
 		spawns?: string;
+		modelRegistry?: ToolSession["modelRegistry"];
 	} = {},
 ): ToolSession {
 	return {
@@ -59,6 +65,7 @@ function createSession(
 		getAgentId: () => options.agentId ?? null,
 		getPlanModeState: options.planMode ? () => ({ enabled: true }) : undefined,
 		asyncJobManager: options.manager,
+		modelRegistry: options.modelRegistry,
 	} as unknown as ToolSession;
 }
 
@@ -139,6 +146,9 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.outputSchema).toBeDefined();
 		expect(typeof itemProperties.outputSchema).toBe("object");
 		expect(itemProperties.schemaMode).toBeDefined();
+		expect(itemProperties.model).toBeDefined();
+		expect(offProperties.model).toBeDefined();
+		expect(onProperties.model).toBeUndefined();
 	});
 
 	it("requires coordination instead of promising same-file auto-resolution", async () => {
@@ -182,6 +192,19 @@ describe("task.batch schema gating", () => {
 		batchSession.settings.override("task.enableEffort", true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
 		expect(batch.description).toContain("`effort`");
+	});
+
+	it("always exposes model on the wire schema unlike effort", async () => {
+		mockDiscovery();
+		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		expect(getSchemaProperties(flat).model).toBeDefined();
+		expect(flat.description).toContain("`model`");
+		expect(flat.description).toContain("Must not pass `default`");
+
+		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		expect(getBatchItemProperties(batch).model).toBeDefined();
+		expect(getSchemaProperties(batch).model).toBeUndefined();
+		expect(batch.description).toContain("`model`");
 	});
 
 	it("keeps isolation boolean-only in the batch item schema", async () => {
@@ -703,5 +726,142 @@ describe("task.batch spawning", () => {
 		expect(last?.async?.state).toBe("failed");
 		expect(last?.progress?.find(p => p.id === "Second")?.status).toBe("aborted");
 		expect(last?.progress?.find(p => p.id === "First")?.status).toBe("completed");
+	});
+
+	it("omitting model keeps agent-default resolution unchanged", async () => {
+		mockDiscovery({ ...taskAgent, model: ["@task"] });
+		let captured: string | string[] | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			captured = options.modelOverride;
+			return makeResult(options.id ?? "?");
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": false } }));
+		await tool.execute("tc-omit-model", { agent: "task", name: "Omit", task: "Do the thing." } as TaskParams);
+		const omitted = captured;
+		captured = undefined;
+		await tool.execute("tc-omit-model-2", {
+			agent: "task",
+			name: "OmitAgain",
+			task: "Do the thing again.",
+		} as TaskParams);
+		expect(captured as typeof omitted).toEqual(omitted);
+	});
+
+	it("overrides agent @task with model @smol", async () => {
+		mockDiscovery({ ...taskAgent, model: ["@task"] });
+		const seen = new Map<string, string | string[] | undefined>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			seen.set(options.id ?? "?", options.modelOverride);
+			return makeResult(options.id ?? "?", { modelOverride: options.modelOverride });
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		await tool.execute("tc-smol", {
+			context: "Compare selectors.",
+			tasks: [
+				{ name: "Inherited", agent: "task", task: "Inherit." },
+				{ name: "Smol", agent: "task", model: "@smol", task: "Use smol." },
+			],
+		} as TaskParams);
+		expect(seen.get("Smol")).not.toEqual(seen.get("Inherited"));
+		expect(seen.get("Smol")).toBeDefined();
+	});
+
+	it("forwards two agent:task items with two models to distinct modelOverride and resolvedModel", async () => {
+		mockDiscovery(taskAgent);
+		const seen: Array<{ id?: string; modelOverride?: string | string[]; resolvedModel?: string }> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const resolved = Array.isArray(options.modelOverride) ? options.modelOverride[0] : options.modelOverride;
+			seen.push({ id: options.id, modelOverride: options.modelOverride, resolvedModel: resolved });
+			return makeResult(options.id ?? "?", {
+				modelOverride: options.modelOverride,
+				resolvedModel: resolved,
+			});
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		const result = await tool.execute("tc-two-models", {
+			context: "Debate.",
+			tasks: [
+				{ name: "Drafter", agent: "task", model: "anthropic/claude-sonnet-4-6", task: "Draft." },
+				{ name: "Critic", agent: "task", model: "openai/gpt-4o", task: "Critique." },
+			],
+		} as TaskParams);
+		const byId = new Map(seen.map(spawn => [spawn.id, spawn]));
+		expect(byId.get("Drafter")?.modelOverride).toEqual(["anthropic/claude-sonnet-4-6"]);
+		expect(byId.get("Critic")?.modelOverride).toEqual(["openai/gpt-4o"]);
+		expect(result.details?.results.find(row => row.id === "Drafter")?.resolvedModel).toBe(
+			"anthropic/claude-sonnet-4-6",
+		);
+		expect(result.details?.results.find(row => row.id === "Critic")?.resolvedModel).toBe("openai/gpt-4o");
+		expect(getFirstText(result)).not.toContain("same model");
+	});
+
+	it("rejects literal model default at preflight", async () => {
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": false } }));
+		const text = getFirstText(
+			await tool.execute("tc-default", { agent: "task", task: "Do the thing.", model: "default" } as TaskParams),
+		);
+		expect(text).toContain("Omit the field to inherit");
+		const upper = getFirstText(
+			await tool.execute("tc-default-case", {
+				agent: "task",
+				task: "Do the thing.",
+				model: "DEFAULT",
+			} as TaskParams),
+		);
+		expect(upper).toContain("Omit the field to inherit");
+	});
+
+	it("fails closed on unknown or unauthenticatable model selectors", async () => {
+		mockDiscovery();
+		const unknownRegistry = {
+			getAvailable: () => [],
+			getApiKey: async () => undefined,
+		} as unknown as ToolSession["modelRegistry"];
+		const unknownTool = await TaskTool.create(
+			createSession({
+				settings: { "async.enabled": false, "task.batch": false },
+				modelRegistry: unknownRegistry,
+			}),
+		);
+		const unknownText = getFirstText(
+			await unknownTool.execute("tc-unknown", {
+				agent: "task",
+				task: "Do the thing.",
+				model: "unknown/no-such-model",
+			} as TaskParams),
+		);
+		expect(unknownText).toContain("did not match an available model");
+
+		const unauthed: Model<Api> = buildModel({
+			id: "gpt-4o",
+			name: "GPT-4o",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+		const unauthRegistry = {
+			getAvailable: () => [unauthed],
+			getApiKey: async () => undefined,
+		} as unknown as ToolSession["modelRegistry"];
+		const unauthTool = await TaskTool.create(
+			createSession({
+				settings: { "async.enabled": false, "task.batch": false },
+				modelRegistry: unauthRegistry,
+			}),
+		);
+		const unauthText = getFirstText(
+			await unauthTool.execute("tc-unauth", {
+				agent: "task",
+				task: "Do the thing.",
+				model: "openai/gpt-4o",
+			} as TaskParams),
+		);
+		expect(unauthText).toContain("is not authenticatable");
 	});
 });

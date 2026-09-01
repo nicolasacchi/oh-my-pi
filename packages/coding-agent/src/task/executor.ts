@@ -2354,6 +2354,39 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	};
 }
 
+/**
+ * Hub `send` rounds>1 correlator: the recipient's IRC wake / follow-up uses
+ * `irc.roundBudget` instead of the normal IRC softRequestBudget 0. Messaging
+ * arms around the loop and disarms in `finally`. Normal IRC stays budget 0.
+ */
+const roundWakeBudgetById = new Map<string, number>();
+
+/** Arm `agentId` so IRC wake / follow-up uses `budget` (0 = unlimited). */
+export function armRoundWake(agentId: string, budget: number): void {
+	roundWakeBudgetById.set(agentId, budget);
+}
+
+/** Drop the round-wake budget for `agentId`. Safe if never armed. */
+export function disarmRoundWake(agentId: string): void {
+	roundWakeBudgetById.delete(agentId);
+}
+
+/** Test helper: whether `agentId` is currently armed for a rounds loop. */
+export function isRoundWakeArmed(agentId: string): boolean {
+	return roundWakeBudgetById.has(agentId);
+}
+
+function resolveArmedIrcBudget(agentId: string): {
+	softRequestBudget: number;
+	softRequestBudgetNotice: boolean;
+} {
+	const armed = roundWakeBudgetById.get(agentId);
+	if (armed === undefined) {
+		return { softRequestBudget: 0, softRequestBudgetNotice: false };
+	}
+	return { softRequestBudget: armed, softRequestBudgetNotice: armed > 0 };
+}
+
 /** Inputs for {@link attachIrcWakeTurnMonitor}. */
 export interface IrcWakeTurnMonitorOptions {
 	/** Registry id of the kept-alive subagent whose autonomous IRC wake turns are monitored. */
@@ -2415,8 +2448,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			parentToolCallId: options.parentToolCallId,
 			detached: true,
 			sessionFile,
-			softRequestBudget: 0,
-			softRequestBudgetNotice: false,
+			...resolveArmedIrcBudget(id),
 			maxRuntimeMs,
 		});
 
@@ -2677,8 +2709,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		parentToolCallId: options.parentToolCallId,
 		detached: true,
 		sessionFile,
-		softRequestBudget: 0,
-		softRequestBudgetNotice: false,
+		...resolveArmedIrcBudget(id),
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
 	});
 
