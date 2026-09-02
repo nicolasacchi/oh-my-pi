@@ -795,6 +795,31 @@ describe("task.batch spawning", () => {
 		expect(getFirstText(result)).not.toContain("same model");
 	});
 
+	it("warns when two agent:task items resolve to the same model", async () => {
+		mockDiscovery(taskAgent);
+		const seen: Array<{ id?: string; modelOverride?: string | string[]; resolvedModel?: string }> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const resolved = Array.isArray(options.modelOverride) ? options.modelOverride[0] : options.modelOverride;
+			seen.push({ id: options.id, modelOverride: options.modelOverride, resolvedModel: resolved });
+			return makeResult(options.id ?? "?", {
+				modelOverride: options.modelOverride,
+				resolvedModel: resolved,
+			});
+		});
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		const result = await tool.execute("tc-same-model", {
+			context: "Debate.",
+			tasks: [
+				{ name: "Drafter", agent: "task", model: "anthropic/claude-sonnet-4-6", task: "Draft." },
+				{ name: "Critic", agent: "task", model: "anthropic/claude-sonnet-4-6", task: "Critique." },
+			],
+		} as TaskParams);
+		const byId = new Map(seen.map(spawn => [spawn.id, spawn]));
+		expect(byId.get("Drafter")?.modelOverride).toEqual(["anthropic/claude-sonnet-4-6"]);
+		expect(byId.get("Critic")?.modelOverride).toEqual(["anthropic/claude-sonnet-4-6"]);
+		expect(getFirstText(result)).toContain("same model");
+	});
+
 	it("rejects literal model default at preflight", async () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": false } }));

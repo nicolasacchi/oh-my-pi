@@ -7,7 +7,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { executeSend } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
+import { isRoundWakeArmed } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { executeSend, resolveIrcMaxRounds } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
 import type { CoordinationDetails } from "@oh-my-pi/pi-coding-agent/tools/hub/types";
 
 interface FakeSession {
@@ -154,6 +155,92 @@ describe("hub send rounds", () => {
 			{ to: "Child", message: "sibling prose" },
 		);
 		expect(child.delivered[1]?.body).toBe("sibling prose");
+	});
+
+	test("irc.maxRounds clamps requested rounds", async () => {
+		const a = makeFakeSession();
+		const b = makeFakeSession();
+		registry.register({ id: "A", displayName: "task", kind: "sub", session: a.session });
+		registry.register({ id: "B", displayName: "task", kind: "sub", session: b.session, status: "idle" });
+		let n = 0;
+		b.onDeliver(msg => {
+			n++;
+			void bus.send({ from: "B", to: msg.from, body: `pong-${n}`, replyTo: msg.id });
+		});
+
+		const settings = Settings.isolated({ "irc.maxRounds": 2 });
+		expect(resolveIrcMaxRounds(settings)).toBe(2);
+
+		const sent = await executeSend(
+			{ registry, senderId: "A", settings },
+			{ to: "B", message: "debate this", rounds: 8 },
+		);
+		const details = sent.details as CoordinationDetails;
+		expect(sent.isError).toBeFalsy();
+		expect(b.delivered).toHaveLength(2);
+		expect(details.round).toBe(2);
+		expect(details.of).toBe(2);
+		expect(details.stopReason === "cap" || details.stopReason === "done").toBe(true);
+		const text = textOf(sent);
+		expect(text).toContain("round 2/2");
+		expect(text).not.toContain("8/8");
+		expect(text).toMatch(/stopReason: (cap|done)/);
+		expect(b.delivered.map(msg => msg.body)).toEqual([
+			expect.stringContaining("round 1/2"),
+			expect.stringContaining("round 2/2"),
+		]);
+	});
+
+	test("rounds loop arms recipient wake and finally disarms", async () => {
+		const a = makeFakeSession();
+		const b = makeFakeSession();
+		registry.register({ id: "A", displayName: "task", kind: "sub", session: a.session });
+		registry.register({ id: "B", displayName: "task", kind: "sub", session: b.session, status: "idle" });
+		const armedB: boolean[] = [];
+		const armedA: boolean[] = [];
+		let n = 0;
+		b.onDeliver(msg => {
+			armedB.push(isRoundWakeArmed("B"));
+			armedA.push(isRoundWakeArmed("A"));
+			n++;
+			void bus.send({ from: "B", to: msg.from, body: `pong-${n}`, replyTo: msg.id });
+		});
+
+		const sent = await executeSend(
+			{ registry, senderId: "A", settings: Settings.isolated() },
+			{ to: "B", message: "debate this", rounds: 3 },
+		);
+		expect(sent.isError).toBeFalsy();
+		expect(armedB).toEqual([true, true, true]);
+		expect(armedA).toEqual([false, false, false]);
+		expect(isRoundWakeArmed("B")).toBe(false);
+	});
+
+	test("normal send does not arm round-wake", async () => {
+		const a = makeFakeSession();
+		const b = makeFakeSession();
+		registry.register({ id: "A", displayName: "task", kind: "sub", session: a.session });
+		registry.register({ id: "B", displayName: "task", kind: "sub", session: b.session, status: "idle" });
+
+		let armedDuringOmit: boolean | undefined;
+		b.onDeliver(() => {
+			armedDuringOmit = isRoundWakeArmed("B");
+		});
+		await executeSend({ registry, senderId: "A", settings: Settings.isolated() }, { to: "B", message: "hello" });
+		expect(armedDuringOmit).toBe(false);
+		expect(isRoundWakeArmed("B")).toBe(false);
+
+		let armedDuringOne: boolean | undefined;
+		b.onDeliver(() => {
+			armedDuringOne = isRoundWakeArmed("B");
+		});
+		await executeSend(
+			{ registry, senderId: "A", settings: Settings.isolated() },
+			{ to: "B", message: "hello again", rounds: 1 },
+		);
+		expect(armedDuringOne).toBe(false);
+		expect(isRoundWakeArmed("B")).toBe(false);
+		expect(b.delivered).toHaveLength(2);
 	});
 
 	test.skip("isolated after-yield failed send does not revive", () => {

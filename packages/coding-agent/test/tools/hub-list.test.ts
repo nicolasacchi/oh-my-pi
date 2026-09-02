@@ -19,6 +19,7 @@ import {
 	executeList,
 	executeSend,
 	MAX_HUB_LIST_LIMIT,
+	wrapMainBinding,
 } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
 import { prompt, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -959,7 +960,7 @@ describe("hub list", () => {
 			);
 			expect(sent.isError).toBeFalsy();
 			expect(sent.details?.receipts).toEqual([{ to: "Sleeper", outcome: "revived" }]);
-			expect(delivered).toEqual(["wake up"]);
+			expect(delivered).toEqual([wrapMainBinding("wake up")]);
 			expect(registry.get("Sleeper")?.status).not.toBe("parked");
 		} finally {
 			AgentRegistry.resetGlobalForTests();
@@ -1101,7 +1102,7 @@ describe("hub list session authority", () => {
 			);
 			expect(sent.isError).toBeFalsy();
 			expect(sent.details?.receipts).toEqual([{ to: "Worker", outcome: "revived" }]);
-			expect(delivered).toEqual(["wake current"]);
+			expect(delivered).toEqual([wrapMainBinding("wake current")]);
 		} finally {
 			AgentRegistry.resetGlobalForTests();
 			AgentLifecycleManager.resetGlobalForTests();
@@ -1611,7 +1612,7 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 			);
 			expect(sent.isError).toBeFalsy();
 			expect(sent.details?.receipts).toEqual([{ to: "Worker", outcome: "revived" }]);
-			expect(delivered).toEqual(["wake A"]);
+			expect(delivered).toEqual([wrapMainBinding("wake A")]);
 			expect(registry.get("Worker")?.sessionFile).toBe(childA);
 			expect(countReaddirs(readdirs, scanDir(rootA))).toBe(1);
 
@@ -1622,7 +1623,7 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 			);
 			expect(again.isError).toBeFalsy();
 			expect(again.details?.receipts?.[0]?.to).toBe("Worker");
-			expect(delivered).toEqual(["wake A", "wake A again"]);
+			expect(delivered).toEqual([wrapMainBinding("wake A"), wrapMainBinding("wake A again")]);
 			expect(registry.get("Worker")?.sessionFile).toBe(childA);
 			expect(countReaddirs(readdirs, scanDir(rootA))).toBe(1);
 
@@ -1661,7 +1662,7 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 			);
 			expect(sentB.isError).toBeFalsy();
 			expect(sentB.details?.receipts).toEqual([{ to: "Worker", outcome: "revived" }]);
-			expect(deliveredB).toEqual(["wake B"]);
+			expect(deliveredB).toEqual([wrapMainBinding("wake B")]);
 			expect(registry.get("Worker")?.sessionFile).toBe(childB);
 			expect(countReaddirs(readdirs, scanDir(rootB))).toBe(2);
 			expect(countReaddirs(readdirs, scanDir(rootA))).toBe(1);
@@ -1713,7 +1714,7 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 		);
 		expect(sent.isError).toBeFalsy();
 		expect(sent.details?.receipts).toEqual([{ to: "Worker", outcome: "woken" }]);
-		expect(delivered).toEqual(["live ping"]);
+		expect(delivered).toEqual([wrapMainBinding("live ping")]);
 		expect(registry.get("Worker")?.status).toBe("running");
 		expect(registry.get("Worker")?.session).toBe(liveSession);
 		expect(registry.get("Worker")?.sessionFile).toBe(childA);
@@ -1773,7 +1774,7 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 		);
 		expect(sent.isError).toBeFalsy();
 		expect(sent.details?.receipts).toEqual([{ to: "Worker", outcome: "revived" }]);
-		expect(delivered).toEqual(["wake in-memory"]);
+		expect(delivered).toEqual([wrapMainBinding("wake in-memory")]);
 
 		// Unknown ids still fail with the same guided error, and sends to them
 		// still produce a failed receipt — never a throw.
